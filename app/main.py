@@ -1,6 +1,7 @@
 from fastapi import FastAPI
+from app.services import predict
 
-app = FastAPI(
+app = FastAPI(  
     title="Sentiment Analysis",
     description="API untuk analisis sentimen",
     version="1.0.0"
@@ -10,3 +11,6 @@ app = FastAPI(
 @app.get("/")
 async def health_check():
     return {"status": "ok"}
+
+# predict
+app.include_router(predict.router)
