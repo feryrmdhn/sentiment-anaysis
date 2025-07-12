@@ -1,0 +1,138 @@
+name: CI/CD Pipeline for MLOps
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  ml-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create .env file
+        run: |
+          echo "DATASET_NAME=${{ secrets.DATASET_NAME }}" >> .env
+          echo "ACCOUNT_ID=${{ secrets.ACCOUNT_ID }}"
+          echo "API_KEY=${{ secrets.API_KEY }}" >> .env
+          echo "AWS_BUCKET_NAME=${{ secrets.AWS_BUCKET_NAME }}" >> .env
+          echo "AWS_SAGEMAKER_ROLE_ARN=${{ secrets.AWS_SAGEMAKER_ROLE_ARN }}" >> .env
+          echo "AWS_REGION=${{ secrets.AWS_REGION }}" >> .env
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> .env
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> .env
+
+      - name: Run preprocessing
+        run: python -m app.src.preprocess.preprocess
+
+      - name: Run training
+        run: python -m app.src.train.train
+
+      - name: Deploy model
+        run: python -m app.src.inference.inference
+
+  build-api:
+    needs: ml-pipeline
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create .env file for Docker image
+        run: |
+          echo "DATASET_NAME=${{ secrets.DATASET_NAME }}" >> .env
+          echo "ACCOUNT_ID=${{ secrets.ACCOUNT_ID }}" >> .env
+          echo "API_KEY=${{ secrets.API_KEY }}" >> .env
+          echo "AWS_BUCKET_NAME=${{ secrets.AWS_BUCKET_NAME }}" >> .env
+          echo "AWS_SAGEMAKER_ROLE_ARN=${{ secrets.AWS_SAGEMAKER_ROLE_ARN }}" >> .env
+          echo "AWS_REGION=${{ secrets.AWS_REGION }}" >> .env
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> .env
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> .env
+
+      - name: Build Docker image
+        run: |
+          docker build -t fastapi-app .
+
+      - name: Log in to AWS ECR (Elastic Container Registry)
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: private
+          skip-logout: false
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Create ECR repository if it doesn't exist
+        run: |
+          aws ecr describe-repositories --repository-names fastapi-app || aws ecr create-repository --repository-name fastapi-app
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Tag Docker image
+        run: |
+          docker tag fastapi-app:latest ${{ secrets.ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/fastapi-app:latest
+
+      - name: Push Docker image to Amazon ECR
+        run: |
+          docker push ${{ secrets.ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/fastapi-app:latest
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  deploy:
+    needs: build-api
+    runs-on: ubuntu-latest
+    steps:
+      # Setup SSH
+      - name: Install SSH key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_CICD }}
+          known_hosts: unnecessary
+          if_key_exists: replace
+
+      - name: Adding Known Hosts
+        run: ssh-keyscan -H ${{ secrets.EC2_PUBLIC_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Test SSH to EC2 public
+        run: ssh ${{ secrets.AWS_EC2_USER }}@${{ secrets.EC2_PUBLIC_HOST }} "echo 'Connect SSH Success'"
+
+      - name: Pull latest image from ECR & restart container
+        run: |
+          ssh ${{ secrets.AWS_EC2_USER }}@${{ secrets.EC2_PUBLIC_HOST }} "
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
+              | docker login --username AWS --password-stdin ${{ secrets.ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com && \
+            docker pull ${{ secrets.ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/fastapi-app:latest && \
+            docker stop fastapi-app || true && \
+            docker rm fastapi-app || true && \
+            docker run -d --name fastapi-app --restart always --env-file .env -p 80:8000 ${{ secrets.ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/fastapi-app:latest
+          "
+
+      
