@@ -124,6 +124,28 @@ jobs:
       - name: Test SSH to EC2 public
         run: ssh ${{ secrets.AWS_EC2_USER }}@${{ secrets.EC2_PUBLIC_HOST }} "echo 'Connect SSH Success'"
 
+      - name: Adding Known Hosts
+        run: |
+          # Remove existing public host
+          ssh-keygen -R ${{ secrets.EC2_PUBLIC_HOST }} 2>/dev/null || true
+
+          # Add new public host
+          ssh-keyscan -t ed25519,rsa ${{ secrets.EC2_PUBLIC_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Create .env in EC2
+        run: |
+          ssh ${{ secrets.AWS_EC2_USER }}@${{ secrets.EC2_PUBLIC_HOST }} "cat > ~/.env <<'EOF'
+          DATASET_NAME=${{ secrets.DATASET_NAME }}
+          ACCOUNT_ID=${{ secrets.ACCOUNT_ID }}
+          API_KEY=${{ secrets.API_KEY }}
+          AWS_BUCKET_NAME=${{ secrets.AWS_BUCKET_NAME }}
+          AWS_SAGEMAKER_ROLE_ARN=${{ secrets.AWS_SAGEMAKER_ROLE_ARN }}
+          AWS_REGION=${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          EOF"
+
       - name: Pull latest image from ECR & restart container
         run: |
           ssh ${{ secrets.AWS_EC2_USER }}@${{ secrets.EC2_PUBLIC_HOST }} "
